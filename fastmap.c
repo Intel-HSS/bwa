@@ -6,6 +6,9 @@
 #include <limits.h>
 #include <ctype.h>
 #include <math.h>
+#ifdef MEM_TBB
+#include <getopt.h>
+#endif
 #include "bwa.h"
 #include "bwamem.h"
 #include "kvec.h"
@@ -96,6 +99,21 @@ static void *process(void *shared, int step, void *_data)
 	return 0;
 }
 
+ktp_data_t* process_0(ktp_aux_t* aux)
+{
+	return process(aux,0,0);
+}
+
+void process_1(ktp_aux_t* aux, ktp_data_t* data)
+{
+	process(aux,1,data);
+}
+
+void process_2(ktp_aux_t* aux, ktp_data_t* data)
+{
+	process(aux,2,data);
+}
+
 static void update_a(mem_opt_t *opt, const mem_opt_t *opt0)
 {
 	if (opt0->a) { // matching score is changed
@@ -114,6 +132,13 @@ static void update_a(mem_opt_t *opt, const mem_opt_t *opt0)
 
 int main_mem(int argc, char *argv[])
 {
+#ifdef MEM_TBB
+	static struct option long_options[] = {
+		{ "tbb", no_argument, 0, 1000 },
+		{ 0    , 0                , 0, 0 }
+	};
+	int tbb=0;
+#endif
 	mem_opt_t *opt, opt0;
 	int fd, fd2, i, c, ignore_alt = 0, no_mt_io = 0;
 	int fixed_chunk_size = -1;
@@ -130,7 +155,11 @@ int main_mem(int argc, char *argv[])
 
 	aux.opt = opt = mem_opt_init();
 	memset(&opt0, 0, sizeof(mem_opt_t));
+#ifndef MEM_TBB
 	while ((c = getopt(argc, argv, "1epaFMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:")) >= 0) {
+#else	
+	while ((c = getopt_long(argc, argv, "1epaFMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:", long_options, 0)) >= 0) {
+#endif
 		if (c == 'k') opt->min_seed_len = atoi(optarg), opt0.min_seed_len = 1;
 		else if (c == '1') no_mt_io = 1;
 		else if (c == 'x') mode = optarg;
@@ -224,6 +253,10 @@ int main_mem(int argc, char *argv[])
 			if (bwa_verbose >= 3)
 				fprintf(stderr, "[M::%s] mean insert size: %.3f, stddev: %.3f, max: %d, min: %d\n",
 						__func__, pes[1].avg, pes[1].std, pes[1].high, pes[1].low);
+#ifdef MEM_TBB
+		} else if (c == 1000) {
+			tbb=1;
+#endif			
 		}
 		else return 1;
 	}
@@ -252,6 +285,9 @@ int main_mem(int argc, char *argv[])
 		fprintf(stderr, "       -S            skip mate rescue\n");
 		fprintf(stderr, "       -P            skip pairing; mate rescue performed unless -S also in use\n");
 		fprintf(stderr, "       -e            discard full-length exact matches\n");
+#ifdef MEM_TBB
+		fprintf(stderr, "       --tbb         intel tbb scheduler\n");
+#endif
 		fprintf(stderr, "\nScoring options:\n\n");
 		fprintf(stderr, "       -A INT        score for a sequence match, which scales options -TdBOELU unless overridden [%d]\n", opt->a);
 		fprintf(stderr, "       -B INT        penalty for a mismatch [%d]\n", opt->b);
@@ -361,9 +397,28 @@ int main_mem(int argc, char *argv[])
 	}
 	if (!(opt->flag & MEM_F_ALN_REG))
 		bwa_print_sam_hdr(aux.idx->bns, hdr_line);
+#ifndef MEM_TBB
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 	kt_pipeline(no_mt_io? 1 : 2, process, &aux, 3);
 	free(hdr_line);
+#else
+	extern void mem_process_seqs_tbb(ktp_aux_t* aux, int n_threads);
+	if(!tbb) {
+		aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
+		kt_pipeline(no_mt_io? 1 : 2, process, &aux, 3);
+		free(hdr_line);
+	}
+	else {
+		aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size;
+		int n_threads=1;
+		if(opt->n_threads>1)
+		{
+			n_threads=opt->n_threads;
+			opt->n_threads=1;
+		}
+		mem_process_seqs_tbb(&aux,n_threads);
+	}
+#endif
 	free(opt);
 	bwa_idx_destroy(aux.idx);
 	kseq_destroy(aux.ks);

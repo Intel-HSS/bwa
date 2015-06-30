@@ -4,7 +4,7 @@
 #include "utils.h"
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.7.12-r1044"
+#define PACKAGE_VERSION "0.7.12-r1044-intel_tbb"
 #endif
 
 int bwa_fa2pac(int argc, char *argv[]);
@@ -22,7 +22,6 @@ int bwa_bwtsw2(int argc, char *argv[]);
 
 int main_fastmap(int argc, char *argv[]);
 int main_mem(int argc, char *argv[]);
-int main_mem_tbb(int argc, char *argv[]);
 int main_shm(int argc, char *argv[]);
 
 int main_pemerge(int argc, char *argv[]);
@@ -66,8 +65,12 @@ int main(int argc, char *argv[])
 	double t_real;
 	kstring_t pg = {0,0,0};
 	t_real = realtime();
+#ifndef NO_PG
 	ksprintf(&pg, "@PG\tID:bwa\tPN:bwa\tVN:%s\tCL:%s", PACKAGE_VERSION, argv[0]);
 	for (i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
+#else
+	ksprintf(&pg, "@PG\tID:bwa\tPN:bwa");
+#endif
 	bwa_pg = pg.s;
 	if (argc < 2) return usage();
 	if (strcmp(argv[1], "fa2pac") == 0) ret = bwa_fa2pac(argc-1, argv+1);
@@ -84,7 +87,6 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "bwasw") == 0) ret = bwa_bwtsw2(argc-1, argv+1);
 	else if (strcmp(argv[1], "fastmap") == 0) ret = main_fastmap(argc-1, argv+1);
 	else if (strcmp(argv[1], "mem") == 0) ret = main_mem(argc-1, argv+1);
-	else if (strcmp(argv[1], "memtbb") == 0) ret = main_mem_tbb(argc-1, argv+1);
 	else if (strcmp(argv[1], "shm") == 0) ret = main_shm(argc-1, argv+1);
 	else if (strcmp(argv[1], "pemerge") == 0) ret = main_pemerge(argc-1, argv+1);
 	else if (strcmp(argv[1], "maxk") == 0) ret = main_maxk(argc-1, argv+1);

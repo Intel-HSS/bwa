@@ -1,308 +1,184 @@
 #pragma once
 
 #include <stdint.h>
-#include <cstdlib>
 #include <vector>
 #include <iostream>
+#include <memory>
 
 #include "tbb/pipeline.h"
 #include "tbb/tick_count.h"
-#include "tbb/pipeline.h"
 
+#ifdef USE_MALLOC_WRAPPERS
+#  include "malloc_wrap.h"
+#endif
+#include "bwamem.h"
 #include "bwa.h"
 #include "kseq.h"
-
+#include "utils.h"
 extern "C"
 {
 	KSEQ_DECLARE(gzFile)
 }
-extern char *bwa_pg;
 
-extern unsigned char nst_nt4_table[256];
+//types are copy/past from fastmap.c
+typedef struct {
+	kseq_t *ks, *ks2;
+	mem_opt_t *opt;
+	mem_pestat_t *pes0;
+	int64_t n_processed;
+	int copy_comment, actual_chunk_size;
+	bwaidx_t *idx;
+} ktp_aux_t;
 
-extern "C" void *kopen(const char *fn, int *_fd);
-extern "C" int kclose(void *a);
-extern "C" int mem_sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_pestat_t pes[4], uint64_t id, bseq1_t s[2], mem_alnreg_v a[2]);
-extern "C" mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq);
-extern "C" void mem_mark_primary_se(const mem_opt_t *opt, int n, mem_alnreg_t *a, int64_t id); // IMPORTANT: must run mem_sort_and_dedup() before calling this function
-extern "C" void mem_reg2sam_se(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, bseq1_t *s, mem_alnreg_v *a, int extra_flag, const mem_aln_t *m);
+typedef struct {
+	ktp_aux_t *aux;
+	int n_seqs;
+	bseq1_t *seqs;
+} ktp_data_t;
 
+extern "C" ktp_data_t* process_0(ktp_aux_t* aux);
+extern "C" void process_1(ktp_aux_t* aux, ktp_data_t* data);
+extern "C" void process_2(ktp_aux_t* aux, ktp_data_t* data);
 
 namespace bwa
 {
 	class BSeq
 	{
 	public:
-		BSeq(bseq1_t* seqs, uint32_t size, uint64_t processed): seqs_(seqs), size_(size), processed_(processed)
+		BSeq(ktp_data_t* data, uint64_t n_processed): data_(data), n_processed_(n_processed)
 		{
 		}
 
 		~BSeq()
 		{
-			for (size_t i = 0; i < size_; i++)
-			{
-				free(seqs_[i].name);
-				free(seqs_[i].comment);
-				free(seqs_[i].seq);
-				free(seqs_[i].qual);
-				free(seqs_[i].sam);
-			}
-			free(seqs_);
-			size_=0;
 		}
 
-		bseq1_t* data()
+		ktp_data_t* ktp_data()
 		{
-			return seqs_;
+			return data_;
 		}
 
-		uint32_t size()
+		uint64_t n_processed()
 		{
-			return size_;
+			return n_processed_;
 		}
-
-		uint64_t processed()
-		{
-			return processed_;
-		}
-
+	
 	private:
-		bseq1_t* seqs_;
-		size_t size_;
-		const uint64_t processed_;
-	}; 
-
-	template<typename FILTER, typename IN_TYPE, typename OUT_TYPE>
-	class LogFilter
-	{
-	public:
-		LogFilter(const std::string& name, const FILTER& filter): name_(name), filter_(filter)
-		{
-			std::clog<<name_<<std::endl;
-		}
-
-		OUT_TYPE operator()(IN_TYPE in) const
-		{
-			tbb::tick_count t=tbb::tick_count::now();
-			std::clog<<name_<<"()"<<std::endl;
-			OUT_TYPE out=filter_(in);
-			std::clog<<name_<<"() time="<<(tbb::tick_count::now()-t).seconds()<<std::endl;
-			return out;
-		}
-
-		const FILTER* operator->() const
-		{
-			return &filter_;
-		}
-
-		~LogFilter()
-		{
-			std::clog<<"~"<<name_<<std::endl;
-		}
-
-	private:
-		const std::string name_;
-		const FILTER filter_;
-	};
-
-	template<typename FILTER, typename IN_TYPE>
-	class LogFilter<FILTER, IN_TYPE, void>
-	{
-	public:
-		LogFilter(const std::string& name, const FILTER& filter): name_(name), filter_(filter)
-		{
-			std::clog<<name_<<std::endl;
-		}
-
-		void operator()(IN_TYPE in) const
-		{
-			tbb::tick_count t=tbb::tick_count::now();
-			std::clog<<name_<<"()"<<std::endl;
-			filter_(in);
-			std::clog<<name_<<"() time="<<(tbb::tick_count::now()-t).seconds()<<std::endl;
-		}
-
-		const FILTER* operator->() const
-		{
-			return &filter_;
-		}
-
-		~LogFilter()
-		{
-			std::clog<<"~"<<name_<<std::endl;
-		}
-
-	private:
-		const std::string name_;
-		const FILTER filter_;
+		ktp_data_t* data_;
+		const size_t n_processed_;
 	};
 
 	class ReadBSeqFilter
 	{
 	public:
-		ReadBSeqFilter(std::vector<kseq_t*> ks, const mem_opt_t& opt, bool copy_comment): ks_(ks), opt_(opt), copy_comment_(copy_comment)
+		ReadBSeqFilter(ktp_aux_t& aux): aux_(aux), n_processed_(0)
 		{
-			processed_=0;
-			threads_=0;
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::ReadBSeqFilter::ReadBSeqFilter()]\n";
 		}
 
 		~ReadBSeqFilter()
 		{
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::ReadBSeqFilter::~ReadBSeqFilter()]\n";
 		}
 
 		BSeq* operator()(tbb::flow_control& fc) const
 		{
-			int n_seqs;
-			bseq1_t* seqs;
-			if(seqs=bseq_read(opt_.chunk_size,&n_seqs,ks_[0],ks_[1]))
+			tbb::tick_count t;
+			
+			if(bwa_verbose>=3)
 			{
-				int64_t size = 0;
-				if ((opt_.flag & MEM_F_PE) && (n_seqs&1) == 1) {
-					if (bwa_verbose >= 2)
-						fprintf(stderr, "[W::%s] odd number of reads in the PE mode; last read dropped\n", __func__);
-					n_seqs = n_seqs>>1<<1;
-				}
-				if (!copy_comment_)
-					for (int i = 0; i < n_seqs; ++i) {
-						free(seqs[i].comment); seqs[i].comment = 0;
-					}
-					for (int i = 0; i < n_seqs; ++i) size += seqs[i].l_seq;
-					if (bwa_verbose >= 3)
-						fprintf(stderr, "[M::%s] read %d sequences (%ld bp)...\n", __func__, n_seqs, (long)size);
+				t=tbb::tick_count::now();
+				if (bwa_verbose >= 4) std::clog<<"[D::bwa::ReadBSeqFilter::operator()]\n";
 			}
-			else
+
+			ktp_data_t* data=0;
+			if(!(data=process_0(&aux_)))
 			{
 				fc.stop();
-				return nullptr;
+				return 0;
 			}
-
-			uint64_t processed=processed_;
-			processed_+=n_seqs;
-			return new BSeq(seqs,n_seqs,processed);
+			size_t n_processed=n_processed_;
+			n_processed_+=data->n_seqs;;
+			
+			if(bwa_verbose>=3)	std::clog<<"[M::bwa::ReadBSeqFilter::operator()] "<<(tbb::tick_count::now()-t).seconds()<<" sec\n";
+			
+			return new BSeq(data,n_processed);
 		}
-
+	
 	private:
-		const mem_opt_t& opt_;
-		std::vector<kseq_t*> ks_;
-		const bool copy_comment_;
-		mutable uint64_t processed_;
-		mutable uint32_t threads_;
+		ktp_aux_t& aux_;
+		mutable size_t n_processed_;
 	};
 
 	class WriteBSeqFilter
 	{
 	public:
-		WriteBSeqFilter(std::ostream& out, const bntseq_t& bns, const std::string& rg_line): out_(out), bns_(bns), rg_line_(rg_line)
+		WriteBSeqFilter(ktp_aux_t& aux): aux_(aux)
 		{
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::WriteBSeqFilter::WriteBSeqFilter()]\n";
 		}
 
 		~WriteBSeqFilter()
 		{
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::WriteBSeqFilter::~WriteBSeqFilter()]\n";
 		}
 
-		void write_hdr() const
+		void operator()(BSeq* data) const
 		{
-			for (int i = 0; i < bns_.n_seqs; ++i)
+			tbb::tick_count t;
+			
+			if(bwa_verbose>=3)
 			{
-				//err_printf("@SQ\tSN:%s\tLN:%d\n", bns_->anns[i].name, bns_->anns[i].len);
-				out_<<"@SQ\tSN:"<<bns_.anns[i].name<<"\tLN:"<<bns_.anns[i].len<<"\n";
+				t=tbb::tick_count::now();
+				if (bwa_verbose >= 4) std::clog<<"[D::bwa::WriteBSeqFilter::operator()]\n";
 			}
-			if (!rg_line_.empty())
-			{
-				//err_printf("%s\n", rg_line_);
-				out_<<rg_line_<<"\n";
-			}
-			out_<<bwa_pg<<"\n";
-		}
 
-		void operator()(BSeq* seqs) const
-		{
-			for(size_t i=0; i<seqs->size(); i++)
-			{
-				out_<<(seqs->data())[i].sam;
-			}
-			delete seqs;
-		}
+			process_2(&aux_,data->ktp_data());
 
+			delete data;
+
+			if(bwa_verbose>=3)	std::clog<<"[M::bwa::WriteBSeqFilter::operator()] "<<(tbb::tick_count::now()-t).seconds()<<" sec\n";
+		}
+	
 	private:
-		const bntseq_t& bns_;
-		const std::string& rg_line_;
-		std::ostream& out_;
+		ktp_aux_t& aux_;
 	};
 
 
 	class MemParallelFilter
 	{
 	public:
-		//const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed, int n, bseq1_t *seqs, const mem_pestat_t *pes0)
-		MemParallelFilter(const bwt_t& bwt,  const bntseq_t& bns, const uint8_t* pacseq, const mem_opt_t& opt, const mem_pestat_t* pes0):
-			bwt_(bwt), bns_(bns), pacseq_(pacseq), opt_(opt), pes0_(pes0)
+		MemParallelFilter(ktp_aux_t& aux): aux_(aux)
 		{
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::MemParallelFilter::MemParallelFilter()]\n";
 		}
 
 		~MemParallelFilter()
 		{
-
+			if (bwa_verbose >= 4) std::clog<<"[D::bwa::MemParallelFilter::~MemParallelFilter()]\n";
 		}
 
-		BSeq* operator()(BSeq* seqs) const
+		BSeq* operator()(BSeq* data) const
 		{
-			mem_alnreg_v* regs=reinterpret_cast<mem_alnreg_v*>(malloc(seqs->size() * sizeof(mem_alnreg_v)));
-			mem_pestat_t pes[4];
+			tbb::tick_count t;
 
-			int n_seqs=(opt_.flag&MEM_F_PE)? seqs->size()>>1 : seqs->size();
-
-
-			for(size_t i=0; i<n_seqs; i++)
+			if(bwa_verbose>=3)
 			{
-				//worker1
-				if(!(opt_.flag&MEM_F_PE))
-				{
-					if (bwa_verbose >= 4) printf("=====> Processing read '%s' <=====\n", seqs->data()[i].name);
-					regs[i] = mem_align1_core(&opt_, &bwt_, &bns_, pacseq_, seqs->data()[i].l_seq, seqs->data()[i].seq);
-				}
-				else
-				{
-					if(bwa_verbose >= 4) printf("=====> Processing read '%s'/1 <=====\n", seqs->data()[i<<1|0].name);
-					regs[i<<1|0] = mem_align1_core(&opt_, &bwt_, &bns_, pacseq_, seqs->data()[i<<1|0].l_seq, seqs->data()[i<<1|0].seq);
-					if(bwa_verbose >= 4) printf("=====> Processing read '%s'/2 <=====\n", seqs->data()[i<<1|1].name);
-					regs[i<<1|1] = mem_align1_core(&opt_, &bwt_, &bns_, pacseq_, seqs->data()[i<<1|1].l_seq, seqs->data()[i<<1|1].seq);
-				}
+				t=tbb::tick_count::now();
+				if (bwa_verbose >= 4) std::clog<<"[D::bwa::MemParallelFilter::operator()]\n";
 			}
 
-			//TODO: behaviour should be the same as original version with one thread, in other case this filter should be splitted to three...
-			if(opt_.flag&MEM_F_PE)
-			{ // infer insert sizes if not provided
-				if(pes0_) memcpy(pes, pes0_, 4 * sizeof(mem_pestat_t)); // if pes0 != NULL, set the insert-size distribution as pes0
-				else mem_pestat(&opt_, bns_.l_pac, seqs->size(), regs, pes); // otherwise, infer the insert size distribution from data
-			}
+			static ktp_aux_t aux=aux_;
+			aux.n_processed=data->n_processed();
+			process_1(&aux,data->ktp_data());
 
-			for(size_t i=0; i<n_seqs; i++)
-			{
-				//worker 2
-				if(!(opt_.flag&MEM_F_PE))
-				{
-					if(bwa_verbose >= 4) printf("=====> Finalizing read '%s' <=====\n", seqs->data()[i].name);
-					mem_mark_primary_se(&opt_, regs[i].n, regs[i].a, /*w->n_processed +*/ seqs->processed()+i);
-					mem_reg2sam_se(&opt_, &bns_, pacseq_, &seqs->data()[i], &regs[i], 0, 0);
-					free(regs[i].a);
-				}
-				else
-				{
-					if(bwa_verbose >= 4) printf("=====> Finalizing read pair '%s' <=====\n", seqs->data()[i<<1|0].name);
-					mem_sam_pe(&opt_, &bns_, pacseq_, &pes[0], /*(w->n_processed>>1) +*/(seqs->processed()>>1)+i, &seqs->data()[i<<1], &regs[i<<1]);
-					free(regs[i<<1|0].a); free(regs[i<<1|1].a);
-				}
-			}
-			free(regs);
-			return seqs;
+			if(bwa_verbose>=3)	std::clog<<"[M::bwa::MemParallelFilter::operator()] "<<(tbb::tick_count::now()-t).seconds()<<" sec\n";
+
+			return data;
 		}
 
 	private:
-		const bntseq_t& bns_;
-		const mem_pestat_t* pes0_;
-		const mem_opt_t& opt_;
-		const bwt_t& bwt_;
-		const uint8_t* pacseq_;
+		ktp_aux_t& aux_;
 	};
 }
+

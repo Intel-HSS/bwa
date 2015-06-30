@@ -47,6 +47,15 @@ static void *ktf_worker(void *data)
 
 void kt_for(int n_threads, void (*func)(void*,long,int), void *data, long n)
 {
+	if(n_threads<=1)
+	{
+		int i;
+		for(i=0; i<n; i++)
+		{
+			func(data,i,0);
+		}
+		return;
+	}
 	int i;
 	kt_for_t t;
 	pthread_t *tid;
